@@ -87,4 +87,56 @@ class ProfileRepository(context: Context) {
     fun setActiveProfileId(id: String) {
         prefs.edit().putString("active_profile_id", id).apply()
     }
+    /**
+     * 匯出：產出具備縮排美化的 JSON 字串
+     */
+    fun exportToJsonString(): String {
+        val profiles = getAllProfiles()
+        val arr = JSONArray()
+        for (p in profiles) {
+            arr.put(p.toJson())
+        }
+        return arr.toString(2) // 縮排 2 格方便人類閱讀
+    }
+
+    /**
+     * 匯入：解析 JSON 字串並智慧合併至本地
+     * @return 成功匯入/更新的設定檔數量
+     */
+    fun importFromJsonString(jsonStr: String): Result<Int> {
+        return try {
+            val arr = JSONArray(jsonStr)
+            val importedList = mutableListOf<VolumeProfile>()
+            for (i in 0 until arr.length()) {
+                importedList.add(VolumeProfile.fromJson(arr.getJSONObject(i)))
+            }
+
+            if (importedList.isEmpty()) {
+                return Result.failure(IllegalArgumentException("檔案中無有效的設定檔資料"))
+            }
+
+            val currentList = getAllProfiles()
+            var count = 0
+
+            for (imported in importedList) {
+                val existingIndex = currentList.indexOfFirst { it.id == imported.id }
+                if (existingIndex != -1) {
+                    // 若存在且非系統預設檔，進行內容覆寫更新
+                    if (!currentList[existingIndex].isDefault) {
+                        currentList[existingIndex] = imported.copy(isDefault = false)
+                        count++
+                    }
+                } else {
+                    // 若為全新設定檔，直接加入列表 (強制非預設)
+                    currentList.add(imported.copy(isDefault = false))
+                    count++
+                }
+            }
+
+            saveAllProfiles(currentList)
+            Result.success(count)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
 }

@@ -60,6 +60,54 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestMultiplePermissions()
     ) { }
 
+    // 匯出選擇器
+    private val exportLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        uri?.let { saveExportFileToUri(it) }
+    }
+
+    // 匯入選擇器
+    private val importLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { readImportFileFromUri(it) }
+    }
+
+    private fun saveExportFileToUri(uri: android.net.Uri) {
+        try {
+            contentResolver.openOutputStream(uri)?.use { outputStream ->
+                val json = profileRepo.exportToJsonString()
+                outputStream.write(json.toByteArray(Charsets.UTF_8))
+            }
+            Toast.makeText(this, "設定檔已成功匯出！", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "匯出失敗: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun readImportFileFromUri(uri: android.net.Uri) {
+        try {
+            val jsonStr = contentResolver.openInputStream(uri)?.use { inputStream ->
+                inputStream.bufferedReader(Charsets.UTF_8).readText()
+            } ?: return
+
+            val result = profileRepo.importFromJsonString(jsonStr)
+            result.onSuccess { count ->
+                Toast.makeText(this, "成功匯入/更新 $count 個設定檔！", Toast.LENGTH_SHORT).show()
+                // 刷新當前數據與介面
+                loadInitialProfile()
+                curveEditorView.setControlPoints(currentPoints)
+                refreshPointsListUi()
+                updateProfileStatusUi()
+            }.onFailure { err ->
+                Toast.makeText(this, "匯入失敗：檔案格式不正確 (${err.message})", Toast.LENGTH_LONG).show()
+            }
+        } catch (e: Exception) {
+            Toast.makeText(this, "讀取檔案失敗: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestRequiredPermissions()
@@ -486,6 +534,46 @@ class MainActivity : ComponentActivity() {
         saveAsRow.addView(nameInput)
         saveAsRow.addView(createBtn)
         dialogContainer.addView(saveAsRow)
+
+        // --- 在 dialogContainer.addView(saveAsRow) 下方加入以下程式碼 ---
+
+        val backupActionRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, dpToPx(12), 0, 0)
+        }
+
+        val exportBtn = Button(this).apply {
+            text = "匯出備份 (JSON)"
+            textSize = 12f
+            setTextColor(Color.parseColor("#00E5FF"))
+            background = createCardBackground(Color.parseColor("#222631"), 6f)
+            layoutParams = LinearLayout.LayoutParams(0, dpToPx(38), 1f).apply {
+                marginEnd = dpToPx(6)
+            }
+            setOnClickListener {
+                dialogRef?.dismiss()
+                exportLauncher.launch("velotune_profiles.json")
+            }
+        }
+
+        val importBtn = Button(this).apply {
+            text = "匯入設定檔"
+            textSize = 12f
+            setTextColor(Color.parseColor("#30D158"))
+            background = createCardBackground(Color.parseColor("#222631"), 6f)
+            layoutParams = LinearLayout.LayoutParams(0, dpToPx(38), 1f).apply {
+                marginStart = dpToPx(6)
+            }
+            setOnClickListener {
+                dialogRef?.dismiss()
+                importLauncher.launch(arrayOf("application/json", "text/*", "*/*"))
+            }
+        }
+
+        backupActionRow.addView(exportBtn)
+        backupActionRow.addView(importBtn)
+        dialogContainer.addView(backupActionRow)
 
         dialogRef = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setView(dialogContainer)
