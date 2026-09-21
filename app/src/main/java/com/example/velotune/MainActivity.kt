@@ -33,11 +33,10 @@ class MainActivity : ComponentActivity() {
     private val activityScope = CoroutineScope(Dispatchers.Main + Job())
     private lateinit var profileRepo: ProfileRepository
 
-    // 當前作用中的設定檔物件
     private lateinit var activeProfile: VolumeProfile
     private val currentPoints = mutableListOf<ControlPoint>()
 
-    private var isDirty = false
+    private var hasUnsavedChanges = false
     private var highlightedPointIndex = -1
 
     // UI 元件
@@ -47,6 +46,10 @@ class MainActivity : ComponentActivity() {
     private lateinit var serviceStateBadge: TextView
     private lateinit var liveSpeedValText: TextView
     private lateinit var liveVolumeValText: TextView
+
+    // 扁平化直出：儲存與還原快捷按鈕
+    private lateinit var quickSaveBtn: Button
+    private lateinit var quickRevertBtn: Button
 
     private lateinit var startBtn: Button
     private lateinit var pauseBtn: Button
@@ -75,9 +78,8 @@ class MainActivity : ComponentActivity() {
 
         currentPoints.clear()
         currentPoints.addAll(activeProfile.points.sortedBy { it.speedKmh })
-        isDirty = false
+        hasUnsavedChanges = false
 
-        // 同步通知背景 Service
         AutoVolumeService.updateCurveFromEditor(currentPoints)
     }
 
@@ -92,9 +94,13 @@ class MainActivity : ComponentActivity() {
             setPadding(dpToPx(16), dpToPx(16), dpToPx(16), dpToPx(32))
         }
 
+        // 1. 頂部儀表板 (內含直出快捷按鈕)
         val dashboardCard = createDashboardCard()
+
+        // 2. 4 鍵控制面板
         val actionControls = createFullControlPanel()
 
+        // 3. 2D 曲線編輯器
         curveEditorView = VolumeCurveEditorView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -116,6 +122,7 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // 4. 控制點標題列
         val listHeader = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -161,29 +168,16 @@ class MainActivity : ComponentActivity() {
             setPadding(dpToPx(16), dpToPx(16), dpToPx(16), dpToPx(16))
         }
 
-        val statusHeader = LinearLayout(this).apply {
+        // 頂部列：設定檔狀態標題與運行狀態 Badge
+        val topStatusRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
 
         profileStatusText = TextView(this).apply {
-            textSize = 14f
+            textSize = 15f
             typeface = Typeface.DEFAULT_BOLD
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
-
-        // 管理設定檔按鈕
-        val profileMenuBtn = Button(this).apply {
-            text = "設定檔 ▼"
-            textSize = 12f
-            setTextColor(Color.parseColor("#00E5FF"))
-            background = createCardBackground(Color.parseColor("#262B36"), 6f)
-            setPadding(dpToPx(8), 0, dpToPx(8), 0)
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                dpToPx(32)
-            ).apply { marginEnd = dpToPx(8) }
-            setOnClickListener { showProfileOptionsMenu() }
         }
 
         serviceStateBadge = TextView(this).apply {
@@ -195,13 +189,65 @@ class MainActivity : ComponentActivity() {
             background = createCardBackground(Color.parseColor("#3C4453"), 6f)
         }
 
-        statusHeader.addView(profileStatusText)
-        statusHeader.addView(profileMenuBtn)
-        statusHeader.addView(serviceStateBadge)
+        topStatusRow.addView(profileStatusText)
+        topStatusRow.addView(serviceStateBadge)
 
+        // 扁平化操作列：[📑 所有設定檔清單] + 條件浮現的 [💾 儲存] [🔄 還原]
+        val profileActionRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dpToPx(10), 0, 0)
+        }
+
+        val openListBtn = Button(this).apply {
+            text = "設定檔清單"
+            textSize = 12f
+            setTextColor(Color.parseColor("#00E5FF"))
+            background = createCardBackground(Color.parseColor("#262B36"), 6f)
+            setPadding(dpToPx(10), 0, dpToPx(10), 0)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                dpToPx(32)
+            ).apply { marginEnd = dpToPx(8) }
+            setOnClickListener { showFlatProfileListDialog() }
+        }
+
+        quickSaveBtn = Button(this).apply {
+            text = "儲存"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            background = createCardBackground(Color.parseColor("#059669"), 6f) // 翠綠色
+            setPadding(dpToPx(10), 0, dpToPx(10), 0)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                dpToPx(32)
+            ).apply { marginEnd = dpToPx(8) }
+            visibility = View.GONE
+            setOnClickListener { saveCurrentProfile() }
+        }
+
+        quickRevertBtn = Button(this).apply {
+            text = "還原"
+            textSize = 12f
+            setTextColor(Color.parseColor("#FF9F0A"))
+            background = createCardBackground(Color.parseColor("#2C2418"), 6f)
+            setPadding(dpToPx(10), 0, dpToPx(10), 0)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                dpToPx(32)
+            )
+            visibility = View.GONE
+            setOnClickListener { revertChanges() }
+        }
+
+        profileActionRow.addView(openListBtn)
+        profileActionRow.addView(quickSaveBtn)
+        profileActionRow.addView(quickRevertBtn)
+
+        // 即時數值欄位
         val metricRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dpToPx(16), 0, 0)
+            setPadding(0, dpToPx(14), 0, 0)
         }
 
         val speedCol = LinearLayout(this).apply {
@@ -243,38 +289,210 @@ class MainActivity : ComponentActivity() {
         metricRow.addView(speedCol)
         metricRow.addView(volumeCol)
 
-        card.addView(statusHeader)
+        card.addView(topStatusRow)
+        card.addView(profileActionRow)
         card.addView(metricRow)
         return card
     }
 
     /**
-     * 點擊「設定檔 ▼」彈出操作清單
+     * 【扁平化單一設定檔視窗】
+     * 集合「清單展示」、「一鍵切換」、「直接刪除」與「同頁另存新檔」，無多級跳轉
      */
-    private fun showProfileOptionsMenu() {
-        val options = mutableListOf<String>()
-        options.add("💾 儲存目前變更" + if (isDirty) " (有變動)" else "")
-        options.add("📝 另存為新設定檔...")
-        options.add("🔄 還原變更 (捨棄未存修改)")
-        options.add("📑 切換 / 管理設定檔...")
+    private fun showFlatProfileListDialog() {
+        val allProfiles = profileRepo.getAllProfiles()
 
-        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("設定檔管理 - ${activeProfile.name}")
-            .setItems(options.toTypedArray()) { _, which ->
-                when (which) {
-                    0 -> saveCurrentProfile()
-                    1 -> showSaveAsNewDialog()
-                    2 -> revertChanges()
-                    3 -> showSwitchProfileDialog()
+        val dialogContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#181B22"))
+            setPadding(dpToPx(16), dpToPx(16), dpToPx(16), dpToPx(16))
+        }
+
+        // 標題與說明
+        val title = TextView(this).apply {
+            text = "設定檔管理"
+            setTextColor(Color.WHITE)
+            textSize = 18f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, 0, 0, dpToPx(12))
+        }
+        dialogContainer.addView(title)
+
+        // 滾動設定檔清單容器
+        val scrollView = ScrollView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dpToPx(240)
+            )
+        }
+        val listLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        var dialogRef: AlertDialog? = null
+
+        // 填充所有設定檔
+        for (p in allProfiles) {
+            val isActive = (p.id == activeProfile.id)
+
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = if (isActive) {
+                    createBorderedCardBackground(Color.parseColor("#1F2736"), Color.parseColor("#00E5FF"), 8f, 1)
+                } else {
+                    createCardBackground(Color.parseColor("#222631"), 8f)
+                }
+                setPadding(dpToPx(12), dpToPx(10), dpToPx(12), dpToPx(10))
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { setMargins(0, dpToPx(4), 0, dpToPx(4)) }
+
+                // 點擊此列直接切換
+                setOnClickListener {
+                    if (p.id != activeProfile.id) {
+                        profileRepo.setActiveProfileId(p.id)
+                        activeProfile = p
+                        currentPoints.clear()
+                        currentPoints.addAll(p.points.sortedBy { it.speedKmh })
+                        hasUnsavedChanges = false
+                        highlightedPointIndex = -1
+
+                        curveEditorView.setHighlightedIndex(-1)
+                        curveEditorView.setControlPoints(currentPoints)
+                        AutoVolumeService.updateCurveFromEditor(currentPoints)
+
+                        refreshPointsListUi()
+                        updateProfileStatusUi()
+                        Toast.makeText(this@MainActivity, "已切換至「${p.name}」", Toast.LENGTH_SHORT).show()
+                    }
+                    dialogRef?.dismiss()
                 }
             }
-            .setNegativeButton("取消", null)
+
+            val indicator = TextView(this).apply {
+                text = if (isActive) "✔" else "○"
+                setTextColor(if (isActive) Color.parseColor("#00E5FF") else Color.parseColor("#6B7280"))
+                textSize = 14f
+                setPadding(0, 0, dpToPx(10), 0)
+            }
+
+            val infoCol = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            val nameText = TextView(this).apply {
+                text = p.name + if (p.isDefault) " [預設]" else ""
+                setTextColor(Color.WHITE)
+                textSize = 14f
+                typeface = Typeface.DEFAULT_BOLD
+            }
+            val descText = TextView(this).apply {
+                text = "${p.points.size} 個錨點 | 最高速 ${p.points.maxOfOrNull { it.speedKmh }?.toInt() ?: 120} km/h"
+                setTextColor(Color.parseColor("#8C93A4"))
+                textSize = 11f
+            }
+            infoCol.addView(nameText)
+            infoCol.addView(descText)
+
+            row.addView(indicator)
+            row.addView(infoCol)
+
+            // 若非預設設定檔，右側直接放置 ✕ 刪除按鈕
+            if (!p.isDefault) {
+                val delBtn = Button(this).apply {
+                    text = "✕"
+                    textSize = 11f
+                    setTextColor(Color.parseColor("#FF453A"))
+                    background = createCardBackground(Color.parseColor("#331F22"), 4f)
+                    layoutParams = LinearLayout.LayoutParams(dpToPx(32), dpToPx(32))
+                    setOnClickListener {
+                        allProfiles.removeAll { it.id == p.id }
+                        profileRepo.saveAllProfiles(allProfiles)
+
+                        if (p.id == activeProfile.id) {
+                            loadInitialProfile()
+                            curveEditorView.setControlPoints(currentPoints)
+                            refreshPointsListUi()
+                            updateProfileStatusUi()
+                        }
+                        dialogRef?.dismiss()
+                        Toast.makeText(this@MainActivity, "已刪除「${p.name}」", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                row.addView(delBtn)
+            }
+
+            listLayout.addView(row)
+        }
+        scrollView.addView(listLayout)
+        dialogContainer.addView(scrollView)
+
+        // 底部分隔線與【同頁另存為新檔】輸入列
+        val divider = View(this).apply {
+            setBackgroundColor(Color.parseColor("#282C37"))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dpToPx(1)
+            ).apply { setMargins(0, dpToPx(12), 0, dpToPx(12)) }
+        }
+        dialogContainer.addView(divider)
+
+        val saveAsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val nameInput = EditText(this).apply {
+            hint = "輸入新名稱..."
+            setHintTextColor(Color.parseColor("#5A6275"))
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            background = createCardBackground(Color.parseColor("#222631"), 6f)
+            setPadding(dpToPx(10), dpToPx(8), dpToPx(10), dpToPx(8))
+            layoutParams = LinearLayout.LayoutParams(0, dpToPx(38), 1f).apply {
+                marginEnd = dpToPx(8)
+            }
+        }
+        val createBtn = Button(this).apply {
+            text = "＋ 另存新檔"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            background = createCardBackground(Color.parseColor("#0070F3"), 6f)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                dpToPx(38)
+            )
+            setOnClickListener {
+                val inputName = nameInput.text.toString().trim()
+                if (inputName.isNotEmpty()) {
+                    val newProfile = VolumeProfile(
+                        name = inputName,
+                        points = currentPoints.toList(),
+                        isDefault = false
+                    )
+                    allProfiles.add(newProfile)
+                    profileRepo.saveAllProfiles(allProfiles)
+                    profileRepo.setActiveProfileId(newProfile.id)
+
+                    activeProfile = newProfile
+                    hasUnsavedChanges = false
+                    updateProfileStatusUi()
+                    dialogRef?.dismiss()
+                    Toast.makeText(this@MainActivity, "已建立並切換至「$inputName」", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+        saveAsRow.addView(nameInput)
+        saveAsRow.addView(createBtn)
+        dialogContainer.addView(saveAsRow)
+
+        dialogRef = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setView(dialogContainer)
+            .setNegativeButton("關閉", null)
             .show()
     }
 
-    /**
-     * 1. 儲存目前變更
-     */
     private fun saveCurrentProfile() {
         val all = profileRepo.getAllProfiles()
         val index = all.indexOfFirst { it.id == activeProfile.id }
@@ -288,53 +506,15 @@ class MainActivity : ComponentActivity() {
         profileRepo.saveAllProfiles(all)
         activeProfile = updatedProfile
 
-        isDirty = false
+        hasUnsavedChanges = false
         updateProfileStatusUi()
         Toast.makeText(this, "已儲存至「${activeProfile.name}」", Toast.LENGTH_SHORT).show()
     }
 
-    /**
-     * 2. 另存為新設定檔
-     */
-    private fun showSaveAsNewDialog() {
-        val input = EditText(this).apply {
-            hint = "輸入新設定檔名稱"
-            setPadding(dpToPx(16), dpToPx(16), dpToPx(16), dpToPx(16))
-        }
-
-        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("另存新設定檔")
-            .setView(input)
-            .setPositiveButton("建立") { _, _ ->
-                val name = input.text.toString().trim()
-                if (name.isNotEmpty()) {
-                    val newProfile = VolumeProfile(
-                        name = name,
-                        points = currentPoints.toList(),
-                        isDefault = false
-                    )
-                    val all = profileRepo.getAllProfiles()
-                    all.add(newProfile)
-                    profileRepo.saveAllProfiles(all)
-                    profileRepo.setActiveProfileId(newProfile.id)
-
-                    activeProfile = newProfile
-                    isDirty = false
-                    updateProfileStatusUi()
-                    Toast.makeText(this, "已建立並切換至「$name」", Toast.LENGTH_SHORT).show()
-                }
-            }
-            .setNegativeButton("取消", null)
-            .show()
-    }
-
-    /**
-     * 3. 還原變更
-     */
     private fun revertChanges() {
         currentPoints.clear()
         currentPoints.addAll(activeProfile.points.sortedBy { it.speedKmh })
-        isDirty = false
+        hasUnsavedChanges = false
         highlightedPointIndex = -1
 
         curveEditorView.setHighlightedIndex(-1)
@@ -343,75 +523,7 @@ class MainActivity : ComponentActivity() {
 
         refreshPointsListUi()
         updateProfileStatusUi()
-        Toast.makeText(this, "已還原為上次儲存的數值", Toast.LENGTH_SHORT).show()
-    }
-
-    /**
-     * 4. 切換或刪除設定檔
-     */
-    private fun showSwitchProfileDialog() {
-        val all = profileRepo.getAllProfiles()
-        val itemNames = all.map {
-            val prefix = if (it.id == activeProfile.id) "✔ " else "    "
-            "$prefix${it.name}" + if (it.isDefault) " [預設]" else ""
-        }.toTypedArray()
-
-        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("選擇設定檔 (長按可刪除)")
-            .setItems(itemNames) { _, which ->
-                val selected = all[which]
-                if (selected.id != activeProfile.id) {
-                    profileRepo.setActiveProfileId(selected.id)
-                    activeProfile = selected
-                    currentPoints.clear()
-                    currentPoints.addAll(selected.points.sortedBy { it.speedKmh })
-                    isDirty = false
-                    highlightedPointIndex = -1
-
-                    curveEditorView.setHighlightedIndex(-1)
-                    curveEditorView.setControlPoints(currentPoints)
-                    AutoVolumeService.updateCurveFromEditor(currentPoints)
-
-                    refreshPointsListUi()
-                    updateProfileStatusUi()
-                    Toast.makeText(this, "已切換至「${selected.name}」", Toast.LENGTH_SHORT).show()
-                }
-            }
-            .setNeutralButton("刪除自訂設定檔") { _, _ ->
-                showDeleteProfileDialog()
-            }
-            .setNegativeButton("取消", null)
-            .show()
-    }
-
-    private fun showDeleteProfileDialog() {
-        val all = profileRepo.getAllProfiles()
-        val customProfiles = all.filter { !it.isDefault }
-
-        if (customProfiles.isEmpty()) {
-            Toast.makeText(this, "沒有可刪除的自訂設定檔", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        val names = customProfiles.map { it.name }.toTypedArray()
-        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("選擇要刪除的設定檔")
-            .setItems(names) { _, which ->
-                val target = customProfiles[which]
-                all.removeAll { it.id == target.id }
-                profileRepo.saveAllProfiles(all)
-
-                // 若剛好刪除當前使用的，切回預設
-                if (target.id == activeProfile.id) {
-                    loadInitialProfile()
-                    curveEditorView.setControlPoints(currentPoints)
-                    refreshPointsListUi()
-                    updateProfileStatusUi()
-                }
-                Toast.makeText(this, "已刪除「${target.name}」", Toast.LENGTH_SHORT).show()
-            }
-            .setNegativeButton("取消", null)
-            .show()
+        Toast.makeText(this, "已還原為上次儲存狀態", Toast.LENGTH_SHORT).show()
     }
 
     private fun createFullControlPanel(): View {
@@ -632,19 +744,23 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun markProfileAsDirty() {
-        if (!isDirty) {
-            isDirty = true
+        if (!hasUnsavedChanges) {
+            hasUnsavedChanges = true
             updateProfileStatusUi()
         }
     }
 
     private fun updateProfileStatusUi() {
-        if (isDirty) {
+        if (hasUnsavedChanges) {
             profileStatusText.text = "● ${activeProfile.name} (未儲存)*"
             profileStatusText.setTextColor(Color.parseColor("#FF9F0A"))
+            quickSaveBtn.visibility = View.VISIBLE
+            quickRevertBtn.visibility = View.VISIBLE
         } else {
             profileStatusText.text = "● ${activeProfile.name}"
             profileStatusText.setTextColor(Color.parseColor("#30D158"))
+            quickSaveBtn.visibility = View.GONE
+            quickRevertBtn.visibility = View.GONE
         }
     }
 
