@@ -10,13 +10,12 @@ class ProfileRepository(context: Context) {
     private val file = File(context.filesDir, "profiles.json")
     private val prefs = context.getSharedPreferences("velotune_prefs", Context.MODE_PRIVATE)
 
-    // 初始內建的三組經典調音範本
     private val presetProfiles: List<VolumeProfile>
         get() = listOf(
             VolumeProfile(
                 id = "default_standard",
                 name = "預設設定檔",
-                isDefault = true,
+                isDefaultStar = true, // 初始唯一預設星星
                 points = listOf(
                     ControlPoint(0f, 0.20f),
                     ControlPoint(30f, 0.45f),
@@ -27,7 +26,7 @@ class ProfileRepository(context: Context) {
             VolumeProfile(
                 id = "default_highway",
                 name = "高速巡航",
-                isDefault = false,
+                isDefaultStar = false,
                 points = listOf(
                     ControlPoint(0f, 0.25f),
                     ControlPoint(50f, 0.40f),
@@ -38,7 +37,7 @@ class ProfileRepository(context: Context) {
             VolumeProfile(
                 id = "default_city",
                 name = "市區通勤",
-                isDefault = false,
+                isDefaultStar = false,
                 points = listOf(
                     ControlPoint(0f, 0.15f),
                     ControlPoint(25f, 0.50f),
@@ -61,7 +60,16 @@ class ProfileRepository(context: Context) {
             for (i in 0 until arr.length()) {
                 list.add(VolumeProfile.fromJson(arr.getJSONObject(i)))
             }
-            if (list.isEmpty()) presetProfiles.toMutableList() else list
+            if (list.isEmpty()) {
+                presetProfiles.toMutableList()
+            } else {
+                // 防呆：確保清單中至少且僅有一顆 ⭐
+                if (list.none { it.isDefaultStar }) {
+                    list[0] = list[0].copy(isDefaultStar = true)
+                    saveAllProfiles(list)
+                }
+                list
+            }
         } catch (e: Exception) {
             e.printStackTrace()
             presetProfiles.toMutableList()
@@ -80,6 +88,32 @@ class ProfileRepository(context: Context) {
         }
     }
 
+    /**
+     * 唯一設定 ⭐ 預設檔：將目標設為 true，其他全部改為 false
+     */
+    fun setStarDefaultProfile(targetId: String) {
+        val list = getAllProfiles()
+        val updated = list.map {
+            it.copy(isDefaultStar = (it.id == targetId))
+        }
+        saveAllProfiles(updated)
+    }
+
+    /**
+     * 取得目前標記 ⭐ 的基準預設設定檔
+     */
+    fun getStarDefaultProfile(): VolumeProfile {
+        val list = getAllProfiles()
+        return list.find { it.isDefaultStar } ?: list.first()
+    }
+
+    /**
+     * 依據藍牙 MAC 位址查找綁定的設定檔
+     */
+    fun findProfileByBtAddress(address: String): VolumeProfile? {
+        return getAllProfiles().find { it.boundBtAddress.equals(address, ignoreCase = true) }
+    }
+
     fun getActiveProfileId(): String {
         return prefs.getString("active_profile_id", "default_standard") ?: "default_standard"
     }
@@ -87,22 +121,16 @@ class ProfileRepository(context: Context) {
     fun setActiveProfileId(id: String) {
         prefs.edit().putString("active_profile_id", id).apply()
     }
-    /**
-     * 匯出：產出具備縮排美化的 JSON 字串
-     */
+
     fun exportToJsonString(): String {
         val profiles = getAllProfiles()
         val arr = JSONArray()
         for (p in profiles) {
             arr.put(p.toJson())
         }
-        return arr.toString(2) // 縮排 2 格方便人類閱讀
+        return arr.toString(2)
     }
 
-    /**
-     * 匯入：解析 JSON 字串並智慧合併至本地
-     * @return 成功匯入/更新的設定檔數量
-     */
     fun importFromJsonString(jsonStr: String): Result<Int> {
         return try {
             val arr = JSONArray(jsonStr)
@@ -121,14 +149,10 @@ class ProfileRepository(context: Context) {
             for (imported in importedList) {
                 val existingIndex = currentList.indexOfFirst { it.id == imported.id }
                 if (existingIndex != -1) {
-                    // 若存在且非系統預設檔，進行內容覆寫更新
-                    if (!currentList[existingIndex].isDefault) {
-                        currentList[existingIndex] = imported.copy(isDefault = false)
-                        count++
-                    }
+                    currentList[existingIndex] = imported.copy(isDefaultStar = currentList[existingIndex].isDefaultStar)
+                    count++
                 } else {
-                    // 若為全新設定檔，直接加入列表 (強制非預設)
-                    currentList.add(imported.copy(isDefault = false))
+                    currentList.add(imported.copy(isDefaultStar = false))
                     count++
                 }
             }

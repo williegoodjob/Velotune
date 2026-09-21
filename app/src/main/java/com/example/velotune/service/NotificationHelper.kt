@@ -25,7 +25,7 @@ class NotificationHelper(private val context: Context) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "Velotune 常駐服務",
-                NotificationManager.IMPORTANCE_LOW // 設為 LOW 確保音量數值更新時不會一直發出提示音
+                NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "顯示車速與音量自動控制狀態"
             }
@@ -36,16 +36,15 @@ class NotificationHelper(private val context: Context) {
     fun buildNotification(
         speedKmh: Float,
         volumeRatio: Float,
-        state: ServiceState
+        state: ServiceState,
+        isGpsLost: Boolean = false
     ): Notification {
-        // 點擊通知主體開啟主畫面
         val openAppIntent = Intent(context, MainActivity::class.java)
         val openAppPendingIntent = PendingIntent.getActivity(
             context, 0, openAppIntent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        // 動作按鈕 1：暫停 / 繼續
         val togglePauseIntent = Intent(context, AutoVolumeService::class.java).apply {
             action = AutoVolumeService.ACTION_TOGGLE_PAUSE
         }
@@ -55,7 +54,6 @@ class NotificationHelper(private val context: Context) {
         )
         val pauseActionTitle = if (state == ServiceState.PAUSED) "繼續" else "暫停"
 
-        // 動作按鈕 2：靜音 / 恢復
         val toggleMuteIntent = Intent(context, AutoVolumeService::class.java).apply {
             action = AutoVolumeService.ACTION_TOGGLE_MUTE
         }
@@ -65,7 +63,6 @@ class NotificationHelper(private val context: Context) {
         )
         val muteActionTitle = if (state == ServiceState.MUTED) "取消靜音" else "靜音"
 
-        // 動作按鈕 3：停止服務
         val stopIntent = Intent(context, AutoVolumeService::class.java).apply {
             action = AutoVolumeService.ACTION_STOP
         }
@@ -74,15 +71,17 @@ class NotificationHelper(private val context: Context) {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        val stateText = when (state) {
-            ServiceState.STOPPED -> "未啟動"
-            ServiceState.RUNNING -> "運行中"
-            ServiceState.PAUSED -> "已暫停"
-            ServiceState.MUTED -> "靜音中"
+        val stateText = when {
+            isGpsLost -> "⚠️ 隧道/訊號中斷"
+            state == ServiceState.RUNNING -> "運行中"
+            state == ServiceState.PAUSED -> "已暫停"
+            state == ServiceState.MUTED -> "靜音中"
+            else -> "待命"
         }
 
         val volumePercent = (volumeRatio * 100).toInt()
-        val contentText = "車速: %.1f km/h | 目標音量: %d%% [%s]".format(speedKmh, volumePercent, stateText)
+        val speedStr = if (isGpsLost) "--.-" else "%.1f".format(speedKmh)
+        val contentText = "車速: %s km/h | 音量: %d%% [%s]".format(speedStr, volumePercent, stateText)
 
         return NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
@@ -97,10 +96,10 @@ class NotificationHelper(private val context: Context) {
             .build()
     }
 
-    fun updateNotification(speedKmh: Float, volumeRatio: Float, state: ServiceState) {
+    fun updateNotification(speedKmh: Float, volumeRatio: Float, state: ServiceState, isGpsLost: Boolean = false) {
         notificationManager.notify(
             NOTIFICATION_ID,
-            buildNotification(speedKmh, volumeRatio, state)
+            buildNotification(speedKmh, volumeRatio, state, isGpsLost)
         )
     }
 

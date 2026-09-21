@@ -12,6 +12,10 @@
 
     <!-- 3. 通知推播權限 (Android 13+ 必備) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 4. 藍牙連線監聽權限 (Android 12+ 需 BLUETOOTH_CONNECT) -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
     <application
         android:allowBackup="true"
