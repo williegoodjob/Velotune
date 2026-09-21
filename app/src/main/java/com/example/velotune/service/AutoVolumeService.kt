@@ -10,6 +10,7 @@ import android.os.IBinder
 import com.example.velotune.core.*
 import com.example.velotune.data.*
 import com.example.velotune.system.AudioController
+import com.example.velotune.system.AudioGuidanceDetector
 import com.example.velotune.system.BluetoothTracker
 import com.example.velotune.system.LocationProvider
 import kotlinx.coroutines.*
@@ -28,15 +29,15 @@ class AutoVolumeService : Service() {
     private lateinit var settingsRepo: SettingsRepository
     private lateinit var btTracker: BluetoothTracker
     private lateinit var volumeSmoother: VolumeSmoother
+    private lateinit var guidanceDetector: AudioGuidanceDetector
 
-    private val speedFilter = SpeedFilter(alpha = 0.35f)
+    private val speedFilter = SpeedFilter()
     private var activeProfile: VolumeProfile? = null
 
-    // 斷訊看門狗
+    // 狀態標記
     private var lastGpsTimestamp: Long = 0L
     private var isGpsLost = false
-
-    // 靜音計時解鎖
+    private var isGuidanceDuckingActive = false // 導航避讓中
     private var muteTimestamp: Long = 0L
 
     override fun onCreate() {
@@ -60,6 +61,7 @@ class AutoVolumeService : Service() {
         applyProfile(initialProfile)
 
         initBluetoothTracker()
+        initGuidanceDetector()
 
         _serviceStateFlow.value = ServiceState.RUNNING
         _liveVolumeRatioFlow.value = audioController.getCurrentVolumeRatio()
@@ -70,6 +72,28 @@ class AutoVolumeService : Service() {
         observeSmoothedVolume()
     }
 
+    private fun initGuidanceDetector() {
+        guidanceDetector = AudioGuidanceDetector(this, serviceScope) { isDucking ->
+            isGuidanceDuckingActive = isDucking
+            _isDuckingFlow.value = isDucking
+
+            // 更新通知欄狀態
+            notificationHelper.updateNotification(
+                speedKmh = _liveSpeedFlow.value,
+                volumeRatio = _liveVolumeRatioFlow.value,
+                state = _serviceStateFlow.value,
+                isGpsLost = isGpsLost,
+                isDuckingActive = isDucking
+            )
+
+            // 導航結束時，立即根據當前車速讓平滑器平穩過渡
+            if (!isDucking) {
+                processVolumeUpdate()
+            }
+        }
+        guidanceDetector.start()
+    }
+
     private fun observeSmoothedVolume() {
         serviceScope.launch {
             volumeSmoother.smoothedVolumeFlow.collect { smoothRatio ->
@@ -78,7 +102,8 @@ class AutoVolumeService : Service() {
                     speedKmh = _liveSpeedFlow.value,
                     volumeRatio = smoothRatio,
                     state = _serviceStateFlow.value,
-                    isGpsLost = isGpsLost
+                    isGpsLost = isGpsLost,
+                    isDuckingActive = isGuidanceDuckingActive
                 )
             }
         }
@@ -121,7 +146,8 @@ class AutoVolumeService : Service() {
             speedKmh = _liveSpeedFlow.value,
             volumeRatio = _liveVolumeRatioFlow.value,
             state = _serviceStateFlow.value,
-            isGpsLost = isGpsLost
+            isGpsLost = isGpsLost,
+            isDuckingActive = isGuidanceDuckingActive
         )
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -154,7 +180,6 @@ class AutoVolumeService : Service() {
                     val filteredSpeed = speedFilter.filter(rawSpeed)
                     _liveSpeedFlow.value = filteredSpeed
 
-                    // 檢查【起步自動解靜音】
                     val settings = settingsRepo.getSettings()
                     if (_serviceStateFlow.value == ServiceState.MUTED && settings.muteAutoResumeBySpeed) {
                         if (filteredSpeed >= settings.muteResumeSpeedThreshold) {
@@ -167,9 +192,6 @@ class AutoVolumeService : Service() {
         }
     }
 
-    /**
-     * 定時看門狗 (GPS 斷訊判定 + 靜音超時自動解除)
-     */
     private fun startWatchdogs() {
         serviceScope.launch {
             while (isActive) {
@@ -177,7 +199,6 @@ class AutoVolumeService : Service() {
                 val settings = settingsRepo.getSettings()
                 val now = System.currentTimeMillis()
 
-                // 1. GPS 斷訊判定
                 if (_serviceStateFlow.value == ServiceState.RUNNING && lastGpsTimestamp > 0) {
                     val timeSinceLastGps = now - lastGpsTimestamp
                     if (timeSinceLastGps > settings.gpsTimeoutMs && !isGpsLost) {
@@ -187,7 +208,6 @@ class AutoVolumeService : Service() {
                     }
                 }
 
-                // 2. 靜音超時自動恢復判定
                 if (_serviceStateFlow.value == ServiceState.MUTED && settings.muteResumeTimeoutSec > 0 && muteTimestamp > 0) {
                     if (now - muteTimestamp >= settings.muteResumeTimeoutSec * 1000L) {
                         _serviceStateFlow.value = ServiceState.RUNNING
@@ -200,11 +220,11 @@ class AutoVolumeService : Service() {
 
     private fun handleGpsLost(settings: AppSettings) {
         when (settings.gpsLossAction) {
-            GpsLossAction.KEEP_LAST -> {
-                // 維持最後音量，不調動
-            }
+            GpsLossAction.KEEP_LAST -> {}
             GpsLossAction.DROP_TO_SAFE -> {
-                volumeSmoother.setTargetVolume(settings.gpsSafeVolumeRatio, immediate = false)
+                if (!isGuidanceDuckingActive) {
+                    volumeSmoother.setTargetVolume(settings.gpsSafeVolumeRatio, immediate = false)
+                }
             }
             GpsLossAction.PAUSE_CONTROL -> {
                 _serviceStateFlow.value = ServiceState.PAUSED
@@ -215,7 +235,8 @@ class AutoVolumeService : Service() {
             speedKmh = _liveSpeedFlow.value,
             volumeRatio = _liveVolumeRatioFlow.value,
             state = _serviceStateFlow.value,
-            isGpsLost = true
+            isGpsLost = true,
+            isDuckingActive = isGuidanceDuckingActive
         )
     }
 
@@ -228,17 +249,20 @@ class AutoVolumeService : Service() {
 
         when (state) {
             ServiceState.RUNNING -> {
-                if (!isGpsLost) {
+                // 【核心避讓防線】：若斷訊 或 導航語音正在播報/通話中，一律凍結調音！
+                if (!isGpsLost && !isGuidanceDuckingActive) {
                     val targetRatio = activeVolumeCurve.evaluate(compensatedSpeed)
-                    volumeSmoother.setTargetVolume(targetRatio, immediate = false)
+                    val currentSmoothed = volumeSmoother.getCurrentRatio()
+
+                    if (kotlin.math.abs(targetRatio - currentSmoothed) >= 0.015f) {
+                        volumeSmoother.setTargetVolume(targetRatio, immediate = false)
+                    }
                 }
             }
             ServiceState.MUTED -> {
                 volumeSmoother.setTargetVolume(0f, immediate = true)
             }
-            ServiceState.PAUSED, ServiceState.STOPPED -> {
-                // 維持現狀
-            }
+            ServiceState.PAUSED, ServiceState.STOPPED -> {}
         }
     }
 
@@ -271,6 +295,7 @@ class AutoVolumeService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        guidanceDetector.stop()
         btTracker.stop()
         _serviceStateFlow.value = ServiceState.STOPPED
         serviceScope.cancel()
@@ -298,6 +323,10 @@ class AutoVolumeService : Service() {
 
         private val _isGpsLostFlow = MutableStateFlow(false)
         val isGpsLostFlow = _isGpsLostFlow.asStateFlow()
+
+        // 導航播報避讓狀態 Flow
+        private val _isDuckingFlow = MutableStateFlow(false)
+        val isDuckingFlow = _isDuckingFlow.asStateFlow()
 
         var activeVolumeCurve: VolumeCurve = VolumeCurve.defaultCurve()
             private set

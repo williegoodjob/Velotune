@@ -1,33 +1,67 @@
 package com.example.velotune.core
 
-/**
- * 速度平滑濾波器 (EMA)
- *
- * @param alpha 平滑係數 (0.0 < alpha <= 1.0)。
- *              數值越低越平滑但有微小延遲；數值越高對速度突變越敏感。
- */
-class SpeedFilter(private val alpha: Float = 0.35f) {
+import kotlin.math.abs
 
-    private var currentFilteredSpeed: Float? = null
+/**
+ * 專業車載複合速度濾波器
+ *
+ * @param deadbandKmh 速度滯後死區 (預設 1.6 km/h，擺動小於此門檻鎖定不變)
+ * @param zeroCutoffKmh 靜止零點截斷 (預設 1.5 km/h，低於此值視為停車 0 km/h)
+ * @param slowAlpha 巡航微幅波動時的平滑係數 (預設 0.08，極強抗噪)
+ * @param fastAlpha 急加減速時的反應係數 (預設 0.45，迅捷跟隨)
+ */
+class SpeedFilter(
+    private val deadbandKmh: Float = 1.6f,
+    private val zeroCutoffKmh: Float = 1.5f,
+    private val slowAlpha: Float = 0.08f,
+    private val fastAlpha: Float = 0.45f
+) {
+
+    private var filteredSpeed: Float? = null
+    private var lockedStableSpeed: Float = 0f
 
     /**
-     * 輸入 GPS 原始速度 (km/h)，輸出平滑後的數值
+     * 輸入原始 GPS 車速，輸出消噪後的穩態車速
      */
-    fun filter(rawSpeedKmh: Float): Float {
-        val prev = currentFilteredSpeed
-        val result = if (prev == null) {
-            rawSpeedKmh
-        } else {
-            alpha * rawSpeedKmh + (1f - alpha) * prev
+    fun filter(rawSpeed: Float): Float {
+        // 1. 靜止截斷：消除紅燈停等時的 GPS 多路徑漂移
+        val cleanSpeed = if (rawSpeed < zeroCutoffKmh) 0f else rawSpeed
+
+        val currentFiltered = filteredSpeed
+        if (currentFiltered == null) {
+            filteredSpeed = cleanSpeed
+            lockedStableSpeed = cleanSpeed
+            return cleanSpeed
         }
-        currentFilteredSpeed = result
-        return result
+
+        // 2. 自適應雙速率 EMA 濾波
+        val diffFromFiltered = abs(cleanSpeed - currentFiltered)
+        val alpha = when {
+            diffFromFiltered > 6.0f -> fastAlpha // 急加速 / 重煞車
+            diffFromFiltered > 2.5f -> (slowAlpha + fastAlpha) / 2f // 正常變速
+            else -> slowAlpha // 勻速巡航 / 雜訊擺動
+        }
+
+        val newFiltered = alpha * cleanSpeed + (1f - alpha) * currentFiltered
+        filteredSpeed = newFiltered
+
+        // 3. 滯後死區 (Deadband Hysteresis) 鎖定
+        // 若過濾後的變化量小於死區門檻，鎖定輸出，不再微幅浮動
+        val diffFromStable = abs(newFiltered - lockedStableSpeed)
+        if (cleanSpeed == 0f) {
+            lockedStableSpeed = 0f
+        } else if (diffFromStable >= deadbandKmh) {
+            lockedStableSpeed = newFiltered
+        }
+
+        return lockedStableSpeed
     }
 
     /**
-     * 重設濾波狀態（訊號斷線重連或重新啟動服務時使用）
+     * 重設濾波狀態 (斷訊恢復或手動重置時調用)
      */
     fun reset() {
-        currentFilteredSpeed = null
+        filteredSpeed = null
+        lockedStableSpeed = 0f
     }
 }

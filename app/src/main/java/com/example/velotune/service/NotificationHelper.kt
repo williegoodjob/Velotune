@@ -37,7 +37,8 @@ class NotificationHelper(private val context: Context) {
         speedKmh: Float,
         volumeRatio: Float,
         state: ServiceState,
-        isGpsLost: Boolean = false
+        isGpsLost: Boolean = false,
+        isDuckingActive: Boolean = false // 👈 新增此參數
     ): Notification {
         val openAppIntent = Intent(context, MainActivity::class.java)
         val openAppPendingIntent = PendingIntent.getActivity(
@@ -70,8 +71,8 @@ class NotificationHelper(private val context: Context) {
             context, 3, stopIntent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-
         val stateText = when {
+            isDuckingActive -> "🗣️ 導航播報中"
             isGpsLost -> "⚠️ 隧道/訊號中斷"
             state == ServiceState.RUNNING -> "運行中"
             state == ServiceState.PAUSED -> "已暫停"
@@ -95,11 +96,16 @@ class NotificationHelper(private val context: Context) {
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "關閉", stopPendingIntent)
             .build()
     }
-
-    fun updateNotification(speedKmh: Float, volumeRatio: Float, state: ServiceState, isGpsLost: Boolean = false) {
+    fun updateNotification(
+        speedKmh: Float,
+        volumeRatio: Float,
+        state: ServiceState,
+        isGpsLost: Boolean = false,
+        isDuckingActive: Boolean = false // 👈 新增此參數
+    ) {
         notificationManager.notify(
             NOTIFICATION_ID,
-            buildNotification(speedKmh, volumeRatio, state, isGpsLost)
+            buildNotification(speedKmh, volumeRatio, state, isGpsLost, isDuckingActive)
         )
     }
 
