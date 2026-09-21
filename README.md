@@ -17,12 +17,6 @@
 </p>
 
 ---
-[![Platform](https://img.shields.io/badge/Platform-Android%208.0%2B-green.svg)](https://developer.android.com)
-[![Language](https://img.shields.io/badge/Language-Kotlin-blue.svg)](https://kotlinlang.org)
-[![Architecture](https://img.shields.io/badge/Architecture-ForegroundService%20%7C%20Coroutines-orange.svg)]()
-[![License](https://img.shields.io/badge/License-MIT-lightgrey.svg)](LICENSE)
-
----
 
 ## 📖 專案簡介 (Overview)
 
