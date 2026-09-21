@@ -1,8 +1,22 @@
-# Velotune 🚗 🔊
+<p align="center">
+  <img src="assets/logo.png" alt="Velotune Logo" width="128" height="128" style="border-radius: 28px;">
+</p>
 
-> **Zero-Touch Automotive Volume Controller for Android**  
-> 專為汽機車用車環境設計的 GPS 速度自適應音量調節工具，具備專業級音訊避讓、抗噪濾波與車載橫屏 HUD 儀表。
+<h1 align="center">Velotune</h1>
 
+<p align="center">
+  <strong>Zero-Touch Automotive Volume Controller for Android</strong><br>
+  專為汽機車用車環境設計的 GPS 速度自適應音量調節工具，具備專業級音訊避讓、抗噪濾波與車載橫屏 HUD 儀表。
+</p>
+
+<p align="center">
+  <a href="https://developer.android.com"><img src="https://img.shields.io/badge/Platform-Android%208.0%2B-green.svg" alt="Platform"></a>
+  <a href="https://kotlinlang.org"><img src="https://img.shields.io/badge/Language-Kotlin-blue.svg" alt="Language"></a>
+  <img src="https://img.shields.io/badge/Architecture-ForegroundService%20%7C%20Coroutines-orange.svg" alt="Architecture">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-lightgrey.svg" alt="License"></a>
+</p>
+
+---
 [![Platform](https://img.shields.io/badge/Platform-Android%208.0%2B-green.svg)](https://developer.android.com)
 [![Language](https://img.shields.io/badge/Language-Kotlin-blue.svg)](https://kotlinlang.org)
 [![Architecture](https://img.shields.io/badge/Architecture-ForegroundService%20%7C%20Coroutines-orange.svg)]()
