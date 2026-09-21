@@ -113,4 +113,8 @@ class NotificationHelper(private val context: Context) {
         const val CHANNEL_ID = "velotune_foreground_channel"
         const val NOTIFICATION_ID = 1001
     }
+
+    fun cancelNotification() {
+        notificationManager.cancel(NOTIFICATION_ID)
+    }
 }

@@ -290,15 +290,28 @@ class AutoVolumeService : Service() {
                 stopSelf()
             }
         }
-        return START_STICKY
+        return START_NOT_STICKY // 👈 改為 START_NOT_STICKY，滑掉或被殺後不自動重啟
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        stopSelf() // 👈 立即停止自身
+    }
+    // 3. 確保 onDestroy 徹底移除通知與關閉所有監聽
     override fun onDestroy() {
         super.onDestroy()
         guidanceDetector.stop()
         btTracker.stop()
         _serviceStateFlow.value = ServiceState.STOPPED
         serviceScope.cancel()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
+        notificationHelper.cancelNotification() // 👈 清除通知欄圖標
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

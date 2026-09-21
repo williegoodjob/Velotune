@@ -24,6 +24,7 @@ import androidx.core.content.ContextCompat
 import com.example.velotune.core.ControlPoint
 import com.example.velotune.core.ServiceState
 import com.example.velotune.data.*
+import com.example.velotune.system.*
 import com.example.velotune.service.AutoVolumeService
 import com.example.velotune.ui.VolumeCurveEditorView
 import kotlinx.coroutines.CoroutineScope
@@ -62,7 +63,15 @@ class MainActivity : ComponentActivity() {
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { }
+    ) { permissions ->
+        val btGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            permissions[Manifest.permission.BLUETOOTH_CONNECT] == true
+        } else true
+
+        if (btGranted) {
+            checkConnectedBluetoothOnLaunch()
+        }
+    }
 
     private val exportLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("application/json")
@@ -78,7 +87,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // 車載防休眠：保持螢幕恆亮
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         requestRequiredPermissions()
@@ -86,6 +94,9 @@ class MainActivity : ComponentActivity() {
         profileRepo = ProfileRepository(this)
         settingsRepo = SettingsRepository(this)
         loadInitialProfile()
+
+        // 👈 加入此行：啟動時檢查是否已經連線藍牙
+        checkConnectedBluetoothOnLaunch()
 
         if (settingsRepo.getSettings().autoStartServiceOnAppOpen) {
             sendServiceAction(AutoVolumeService.ACTION_START)
@@ -113,6 +124,33 @@ class MainActivity : ComponentActivity() {
         AutoVolumeService.updateCurveFromEditor(currentPoints)
     }
 
+    /**
+     * App 啟動或取得權限後，主動檢查是否已連線至已綁定的藍牙裝置
+     */
+    private fun checkConnectedBluetoothOnLaunch() {
+        BluetoothTracker.queryConnectedAudioDevices(this) { activeDevices ->
+            for (device in activeDevices) {
+                val matched = profileRepo.findProfileByBtAddress(device.address)
+                if (matched != null && matched.id != activeProfile.id) {
+                    profileRepo.setActiveProfileId(matched.id)
+                    activeProfile = matched
+                    currentPoints.clear()
+                    currentPoints.addAll(matched.points.sortedBy { it.speedKmh })
+                    this@MainActivity.hasUnsavedChanges = false
+                    highlightedPointIndex = -1
+
+                    curveEditorView.setHighlightedIndex(-1)
+                    curveEditorView.setControlPoints(currentPoints)
+                    AutoVolumeService.updateCurveFromEditor(currentPoints)
+
+                    refreshPointsListUi()
+                    updateProfileStatusUi()
+                    Toast.makeText(this@MainActivity, "已自動識別藍牙裝置，載入「${matched.name}」", Toast.LENGTH_SHORT).show()
+                    break
+                }
+            }
+        }
+    }
     /**
      * 核心響應式畫面構建：自動區分直屏 (Portrait) 與橫屏 (Landscape)
      */
