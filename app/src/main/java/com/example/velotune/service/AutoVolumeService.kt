@@ -8,8 +8,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import com.example.velotune.core.*
-import com.example.velotune.data.ProfileRepository
-import com.example.velotune.data.VolumeProfile
+import com.example.velotune.data.*
 import com.example.velotune.system.AudioController
 import com.example.velotune.system.BluetoothTracker
 import com.example.velotune.system.LocationProvider
@@ -26,16 +25,19 @@ class AutoVolumeService : Service() {
     private lateinit var audioController: AudioController
     private lateinit var locationProvider: LocationProvider
     private lateinit var profileRepo: ProfileRepository
+    private lateinit var settingsRepo: SettingsRepository
     private lateinit var btTracker: BluetoothTracker
     private lateinit var volumeSmoother: VolumeSmoother
 
     private val speedFilter = SpeedFilter(alpha = 0.35f)
     private var activeProfile: VolumeProfile? = null
 
-    // GPS 訊號看門狗變數
+    // 斷訊看門狗
     private var lastGpsTimestamp: Long = 0L
-    private val GPS_TIMEOUT_MS = 4500L // 4.5 秒未收到定位更新即判定為斷訊 (進隧道/高架下)
     private var isGpsLost = false
+
+    // 靜音計時解鎖
+    private var muteTimestamp: Long = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -43,9 +45,14 @@ class AutoVolumeService : Service() {
         audioController = AudioController(this)
         locationProvider = LocationProvider(this)
         profileRepo = ProfileRepository(this)
+        settingsRepo = SettingsRepository(this)
 
-        // 建立音量平滑器
-        volumeSmoother = VolumeSmoother(serviceScope, audioController)
+        val settings = settingsRepo.getSettings()
+        volumeSmoother = VolumeSmoother(
+            scope = serviceScope,
+            audioController = audioController,
+            maxStepDelta = settings.smoothingLevel.delta
+        )
 
         val all = profileRepo.getAllProfiles()
         val activeId = profileRepo.getActiveProfileId()
@@ -59,7 +66,7 @@ class AutoVolumeService : Service() {
 
         startForegroundServiceNotification()
         startSpeedTracking()
-        startGpsWatchdog()
+        startWatchdogs()
         observeSmoothedVolume()
     }
 
@@ -87,6 +94,7 @@ class AutoVolumeService : Service() {
 
     @SuppressLint("MissingPermission")
     private fun handleBluetoothDeviceChange(device: BluetoothDevice?) {
+        val settings = settingsRepo.getSettings()
         if (device != null) {
             val matched = profileRepo.findProfileByBtAddress(device.address)
             if (matched != null) {
@@ -94,8 +102,10 @@ class AutoVolumeService : Service() {
                 return
             }
         }
-        val starDefault = profileRepo.getStarDefaultProfile()
-        applyProfile(starDefault)
+        if (settings.fallbackToStarProfileOnBtDisconnect) {
+            val starDefault = profileRepo.getStarDefaultProfile()
+            applyProfile(starDefault)
+        }
     }
 
     private fun applyProfile(profile: VolumeProfile) {
@@ -135,7 +145,6 @@ class AutoVolumeService : Service() {
                 .collect { rawSpeed ->
                     lastGpsTimestamp = System.currentTimeMillis()
 
-                    // 若剛從斷訊中恢復，重設濾波器防突波
                     if (isGpsLost) {
                         isGpsLost = false
                         _isGpsLostFlow.value = false
@@ -144,34 +153,64 @@ class AutoVolumeService : Service() {
 
                     val filteredSpeed = speedFilter.filter(rawSpeed)
                     _liveSpeedFlow.value = filteredSpeed
+
+                    // 檢查【起步自動解靜音】
+                    val settings = settingsRepo.getSettings()
+                    if (_serviceStateFlow.value == ServiceState.MUTED && settings.muteAutoResumeBySpeed) {
+                        if (filteredSpeed >= settings.muteResumeSpeedThreshold) {
+                            _serviceStateFlow.value = ServiceState.RUNNING
+                        }
+                    }
+
                     processVolumeUpdate()
                 }
         }
     }
 
     /**
-     * GPS 斷訊監控看門狗 (每秒檢查一次是否進隧道)
+     * 定時看門狗 (GPS 斷訊判定 + 靜音超時自動解除)
      */
-    private fun startGpsWatchdog() {
+    private fun startWatchdogs() {
         serviceScope.launch {
             while (isActive) {
                 delay(1000L)
+                val settings = settingsRepo.getSettings()
+                val now = System.currentTimeMillis()
+
+                // 1. GPS 斷訊判定
                 if (_serviceStateFlow.value == ServiceState.RUNNING && lastGpsTimestamp > 0) {
-                    val timeSinceLastGps = System.currentTimeMillis() - lastGpsTimestamp
-                    if (timeSinceLastGps > GPS_TIMEOUT_MS && !isGpsLost) {
+                    val timeSinceLastGps = now - lastGpsTimestamp
+                    if (timeSinceLastGps > settings.gpsTimeoutMs && !isGpsLost) {
                         isGpsLost = true
                         _isGpsLostFlow.value = true
-                        handleGpsLost()
+                        handleGpsLost(settings)
+                    }
+                }
+
+                // 2. 靜音超時自動恢復判定
+                if (_serviceStateFlow.value == ServiceState.MUTED && settings.muteResumeTimeoutSec > 0 && muteTimestamp > 0) {
+                    if (now - muteTimestamp >= settings.muteResumeTimeoutSec * 1000L) {
+                        _serviceStateFlow.value = ServiceState.RUNNING
+                        processVolumeUpdate()
                     }
                 }
             }
         }
     }
 
-    /**
-     * 觸發 GPS 斷訊保護 (維持最後已知音量，避免亂調)
-     */
-    private fun handleGpsLost() {
+    private fun handleGpsLost(settings: AppSettings) {
+        when (settings.gpsLossAction) {
+            GpsLossAction.KEEP_LAST -> {
+                // 維持最後音量，不調動
+            }
+            GpsLossAction.DROP_TO_SAFE -> {
+                volumeSmoother.setTargetVolume(settings.gpsSafeVolumeRatio, immediate = false)
+            }
+            GpsLossAction.PAUSE_CONTROL -> {
+                _serviceStateFlow.value = ServiceState.PAUSED
+            }
+        }
+
         notificationHelper.updateNotification(
             speedKmh = _liveSpeedFlow.value,
             volumeRatio = _liveVolumeRatioFlow.value,
@@ -189,10 +228,8 @@ class AutoVolumeService : Service() {
 
         when (state) {
             ServiceState.RUNNING -> {
-                // 如果目前是斷訊狀態，凍結音量計算，不調整
                 if (!isGpsLost) {
                     val targetRatio = activeVolumeCurve.evaluate(compensatedSpeed)
-                    // 交付給平滑器慢慢過渡！
                     volumeSmoother.setTargetVolume(targetRatio, immediate = false)
                 }
             }
@@ -216,10 +253,12 @@ class AutoVolumeService : Service() {
                 processVolumeUpdate()
             }
             ACTION_TOGGLE_MUTE -> {
-                _serviceStateFlow.value = if (_serviceStateFlow.value == ServiceState.MUTED) {
-                    ServiceState.RUNNING
+                if (_serviceStateFlow.value == ServiceState.MUTED) {
+                    _serviceStateFlow.value = ServiceState.RUNNING
+                    muteTimestamp = 0L
                 } else {
-                    ServiceState.MUTED
+                    _serviceStateFlow.value = ServiceState.MUTED
+                    muteTimestamp = System.currentTimeMillis()
                 }
                 processVolumeUpdate()
             }
@@ -257,7 +296,6 @@ class AutoVolumeService : Service() {
         private val _activeProfileNameFlow = MutableStateFlow("預設設定檔")
         val activeProfileNameFlow = _activeProfileNameFlow.asStateFlow()
 
-        // GPS 斷訊狀態流
         private val _isGpsLostFlow = MutableStateFlow(false)
         val isGpsLostFlow = _isGpsLostFlow.asStateFlow()
 

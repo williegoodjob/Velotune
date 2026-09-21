@@ -31,7 +31,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-
+import com.example.velotune.data.*
 class MainActivity : ComponentActivity() {
 
     private val activityScope = CoroutineScope(Dispatchers.Main + Job())
@@ -80,7 +80,11 @@ class MainActivity : ComponentActivity() {
 
         profileRepo = ProfileRepository(this)
         loadInitialProfile()
-
+        // 檢查是否勾選「開啟 App 自動啟動調音」
+        val settings = SettingsRepository(this).getSettings()
+        if (settings.autoStartServiceOnAppOpen) {
+            sendServiceAction(AutoVolumeService.ACTION_START)
+        }
         buildModernUi()
         observeServiceData()
     }
@@ -196,8 +200,20 @@ class MainActivity : ComponentActivity() {
             setPadding(dpToPx(8), dpToPx(4), dpToPx(8), dpToPx(4))
             background = createCardBackground(Color.parseColor("#3C4453"), 6f)
         }
+        // 設定按鈕
+        val settingsBtn = Button(this).apply {
+            text = "⚙️"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            background = createCardBackground(Color.parseColor("#262B36"), 6f)
+            layoutParams = LinearLayout.LayoutParams(dpToPx(36), dpToPx(32)).apply {
+                marginEnd = dpToPx(8)
+            }
+            setOnClickListener { showSettingsDialog() }
+        }
 
         topStatusRow.addView(profileStatusText)
+        topStatusRow.addView(settingsBtn) // 放置在 Badge 左側
         topStatusRow.addView(serviceStateBadge)
 
         val profileActionRow = LinearLayout(this).apply {
@@ -1140,5 +1156,171 @@ class MainActivity : ComponentActivity() {
             permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
         }
         permissionLauncher.launch(permissions.toTypedArray())
+    }
+
+    private fun showSettingsDialog() {
+        val settingsRepo = SettingsRepository(this)
+        var settings = settingsRepo.getSettings()
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#181B22"))
+            setPadding(dpToPx(20), dpToPx(16), dpToPx(20), dpToPx(20))
+        }
+
+        val title = TextView(this).apply {
+            text = "Velotune 全域偏好設定"
+            setTextColor(Color.WHITE)
+            textSize = 18f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, 0, 0, dpToPx(16))
+        }
+        container.addView(title)
+
+        val scrollView = ScrollView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dpToPx(380)
+            )
+        }
+        val contentLayout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+        // --- 區塊 1: GPS 斷訊/隧道保護 ---
+        contentLayout.addView(createSectionHeader("GPS 訊號中斷保護"))
+
+        val actionBtn = Button(this).apply {
+            val label = when (settings.gpsLossAction) {
+                GpsLossAction.KEEP_LAST -> "維持最後車速音量"
+                GpsLossAction.DROP_TO_SAFE -> "降至安全音量 (25%)"
+                GpsLossAction.PAUSE_CONTROL -> "暫停自動調音"
+            }
+            text = "斷訊處置: $label ▼"
+            textSize = 12f
+            setTextColor(Color.parseColor("#00E5FF"))
+            background = createCardBackground(Color.parseColor("#222631"), 6f)
+            setOnClickListener {
+                val actions = arrayOf("維持最後車速音量", "降至安全音量 (25%)", "暫停自動調音")
+                AlertDialog.Builder(this@MainActivity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                    .setTitle("選擇 GPS 斷訊保護行為")
+                    .setItems(actions) { _, which ->
+                        val selectedAction = when (which) {
+                            0 -> GpsLossAction.KEEP_LAST
+                            1 -> GpsLossAction.DROP_TO_SAFE
+                            else -> GpsLossAction.PAUSE_CONTROL
+                        }
+                        settings = settings.copy(gpsLossAction = selectedAction)
+                        settingsRepo.saveSettings(settings)
+                        text = "斷訊處置: ${actions[which]} ▼"
+                    }
+                    .show()
+            }
+        }
+        contentLayout.addView(actionBtn)
+
+        // --- 區塊 2: 靜音自動解除 ---
+        contentLayout.addView(createSectionHeader("暫時靜音自動解除"))
+
+        val speedResumeSwitch = CheckBox(this).apply {
+            text = "起步加速自動解靜音 (超過 15 km/h)"
+            setTextColor(Color.WHITE)
+            isChecked = settings.muteAutoResumeBySpeed
+            setOnCheckedChangeListener { _, isChecked ->
+                settings = settings.copy(muteAutoResumeBySpeed = isChecked)
+                settingsRepo.saveSettings(settings)
+            }
+        }
+        contentLayout.addView(speedResumeSwitch)
+
+        val timeoutResumeBtn = Button(this).apply {
+            val sec = settings.muteResumeTimeoutSec
+            text = if (sec > 0) "超時自動恢復: $sec 秒 ▼" else "超時自動恢復: 關閉 ▼"
+            textSize = 12f
+            setTextColor(Color.parseColor("#00E5FF"))
+            background = createCardBackground(Color.parseColor("#222631"), 6f)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dpToPx(38)
+            ).apply { topMargin = dpToPx(6) }
+            setOnClickListener {
+                val opts = arrayOf("關閉 (僅手動解靜音)", "30 秒", "60 秒", "120 秒")
+                val vals = intArrayOf(0, 30, 60, 120)
+                AlertDialog.Builder(this@MainActivity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                    .setTitle("靜音超時自動恢復時間")
+                    .setItems(opts) { _, which ->
+                        settings = settings.copy(muteResumeTimeoutSec = vals[which])
+                        settingsRepo.saveSettings(settings)
+                        text = "超時自動恢復: ${opts[which]} ▼"
+                    }
+                    .show()
+            }
+        }
+        contentLayout.addView(timeoutResumeBtn)
+
+        // --- 區塊 3: 音量漸變反應速度 ---
+        contentLayout.addView(createSectionHeader("音量平滑調整速度"))
+
+        val smoothBtn = Button(this).apply {
+            text = "反應速率: ${settings.smoothingLevel.label} ▼"
+            textSize = 12f
+            setTextColor(Color.parseColor("#00E5FF"))
+            background = createCardBackground(Color.parseColor("#222631"), 6f)
+            setOnClickListener {
+                val levels = SmoothingLevel.values()
+                val names = levels.map { it.label }.toTypedArray()
+                AlertDialog.Builder(this@MainActivity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                    .setTitle("選擇調音反應速度")
+                    .setItems(names) { _, which ->
+                        settings = settings.copy(smoothingLevel = levels[which])
+                        settingsRepo.saveSettings(settings)
+                        text = "反應速率: ${levels[which].label} ▼"
+                        Toast.makeText(this@MainActivity, "重啟服務後生效新平滑速率", Toast.LENGTH_SHORT).show()
+                    }
+                    .show()
+            }
+        }
+        contentLayout.addView(smoothBtn)
+
+        // --- 區塊 4: 自動化與藍牙 ---
+        contentLayout.addView(createSectionHeader("啟動與自動化"))
+
+        val autoStartSwitch = CheckBox(this).apply {
+            text = "開啟 App 時自動啟動調音服務"
+            setTextColor(Color.WHITE)
+            isChecked = settings.autoStartServiceOnAppOpen
+            setOnCheckedChangeListener { _, isChecked ->
+                settings = settings.copy(autoStartServiceOnAppOpen = isChecked)
+                settingsRepo.saveSettings(settings)
+            }
+        }
+        contentLayout.addView(autoStartSwitch)
+
+        val fallbackStarSwitch = CheckBox(this).apply {
+            text = "藍牙全斷開時切回 ⭐ 預設設定檔"
+            setTextColor(Color.WHITE)
+            isChecked = settings.fallbackToStarProfileOnBtDisconnect
+            setOnCheckedChangeListener { _, isChecked ->
+                settings = settings.copy(fallbackToStarProfileOnBtDisconnect = isChecked)
+                settingsRepo.saveSettings(settings)
+            }
+        }
+        contentLayout.addView(fallbackStarSwitch)
+
+        scrollView.addView(contentLayout)
+        container.addView(scrollView)
+
+        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setView(container)
+            .setPositiveButton("完成", null)
+            .show()
+    }
+
+    private fun createSectionHeader(title: String): TextView {
+        return TextView(this).apply {
+            text = title
+            setTextColor(Color.parseColor("#8C93A4"))
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, dpToPx(14), 0, dpToPx(6))
+        }
     }
 }
