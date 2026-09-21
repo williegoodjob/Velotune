@@ -9,7 +9,9 @@ import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.ClipDrawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.os.Build
 import android.os.Bundle
 import android.text.InputType
@@ -61,6 +63,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var muteBtn: Button
     private lateinit var stopBtn: Button
 
+    // 靜音按鈕進度條 Drawable
+    private var muteClipDrawable: ClipDrawable? = null
+
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
@@ -95,7 +100,6 @@ class MainActivity : ComponentActivity() {
         settingsRepo = SettingsRepository(this)
         loadInitialProfile()
 
-        // 👈 加入此行：啟動時檢查是否已經連線藍牙
         checkConnectedBluetoothOnLaunch()
 
         if (settingsRepo.getSettings().autoStartServiceOnAppOpen) {
@@ -124,9 +128,6 @@ class MainActivity : ComponentActivity() {
         AutoVolumeService.updateCurveFromEditor(currentPoints)
     }
 
-    /**
-     * App 啟動或取得權限後，主動檢查是否已連線至已綁定的藍牙裝置
-     */
     private fun checkConnectedBluetoothOnLaunch() {
         BluetoothTracker.queryConnectedAudioDevices(this) { activeDevices ->
             for (device in activeDevices) {
@@ -151,9 +152,7 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
-    /**
-     * 核心響應式畫面構建：自動區分直屏 (Portrait) 與橫屏 (Landscape)
-     */
+
     private fun buildResponsiveUi() {
         val isLandscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
@@ -185,7 +184,6 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // 左上角 HUD 儀表橫條
         val hudCard = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -246,7 +244,6 @@ class MainActivity : ComponentActivity() {
         hudCard.addView(volumeCol)
         hudCard.addView(serviceStateBadge)
 
-        // 左下角全高滿版 2D 曲線編輯器
         curveEditorView = createCurveEditorView().apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -579,6 +576,31 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun createProgressButtonBackground(radiusDp: Float): LayerDrawable {
+        val radiusPx = TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_DIP, radiusDp, resources.displayMetrics
+        )
+        // 底層未充填深灰底
+        val bgDrawable = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            setColor(Color.parseColor("#262B36"))
+            cornerRadius = radiusPx
+        }
+        // 上層紅色進度條 (透過 ClipDrawable 水平裁剪)
+        val progressDrawable = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            setColor(Color.parseColor("#DC2626"))
+            cornerRadius = radiusPx
+        }
+        val clip = ClipDrawable(
+            progressDrawable,
+            Gravity.START,
+            ClipDrawable.HORIZONTAL
+        )
+        muteClipDrawable = clip
+        return LayerDrawable(arrayOf(bgDrawable, clip))
+    }
+
     private fun createFullControlPanel(): View {
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -872,14 +894,33 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-        // 觀察導航避讓狀態
+
         activityScope.launch {
             AutoVolumeService.isDuckingFlow.collect { isDucking ->
                 if (isDucking) {
                     serviceStateBadge.text = "🗣️ 導航避讓"
-                    serviceStateBadge.background = createCardBackground(Color.parseColor("#6366F1"), 6f) // 亮靛藍色
+                    serviceStateBadge.background = createCardBackground(Color.parseColor("#6366F1"), 6f)
                 } else {
                     updateControlsByState(AutoVolumeService.serviceStateFlow.value)
+                }
+            }
+        }
+
+        // 觀察靜音倒數並動態更新按鈕進度條與文字
+        activityScope.launch {
+            AutoVolumeService.muteCountdownFlow.collect { countdown ->
+                if (countdown != null && AutoVolumeService.serviceStateFlow.value == ServiceState.MUTED) {
+                    val ratio = (countdown.remainingSec.toFloat() / countdown.totalSec.toFloat()).coerceIn(0f, 1f)
+
+                    if (muteBtn.background !is LayerDrawable) {
+                        muteBtn.background = createProgressButtonBackground(8f)
+                    }
+
+                    muteClipDrawable?.level = (ratio * 10000).toInt()
+                    muteBtn.text = "恢復 (${countdown.remainingSec}s)"
+                } else if (AutoVolumeService.serviceStateFlow.value == ServiceState.MUTED) {
+                    muteBtn.text = "恢復"
+                    muteBtn.background = createCardBackground(Color.parseColor("#DC2626"), 8f)
                 }
             }
         }
@@ -915,8 +956,10 @@ class MainActivity : ComponentActivity() {
                 startBtn.isEnabled = false
                 pauseBtn.isEnabled = true
                 muteBtn.isEnabled = true
-                muteBtn.text = "恢復"
-                muteBtn.background = createCardBackground(Color.parseColor("#DC2626"), 8f)
+                if (AutoVolumeService.muteCountdownFlow.value == null) {
+                    muteBtn.text = "恢復"
+                    muteBtn.background = createCardBackground(Color.parseColor("#DC2626"), 8f)
+                }
                 stopBtn.isEnabled = true
             }
             ServiceState.STOPPED -> {
@@ -1016,21 +1059,75 @@ class MainActivity : ComponentActivity() {
 
         val timeoutResumeBtn = Button(this).apply {
             val sec = settings.muteResumeTimeoutSec
-            text = if (sec > 0) "超時自動恢復: $sec 秒 ▼" else "超時自動恢復: 關閉 ▼"
+            text = if (sec > 0) "超時自動恢復: $sec 秒 (點擊自訂) ▼" else "超時自動恢復: 關閉 ▼"
             textSize = 12f
             setTextColor(Color.parseColor("#00E5FF"))
             background = createCardBackground(Color.parseColor("#222631"), 6f)
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dpToPx(38)).apply { topMargin = dpToPx(6) }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dpToPx(38)
+            ).apply { topMargin = dpToPx(6) }
+
             setOnClickListener {
-                val opts = arrayOf("關閉 (僅手動解靜音)", "30 秒", "60 秒", "120 秒")
-                val vals = intArrayOf(0, 30, 60, 120)
-                AlertDialog.Builder(this@MainActivity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                    .setTitle("靜音超時自動恢復時間")
-                    .setItems(opts) { _, which ->
-                        settings = settings.copy(muteResumeTimeoutSec = vals[which])
-                        settingsRepo.saveSettings(settings)
-                        text = "超時自動恢復: ${opts[which]} ▼"
+                val inputContainer = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dpToPx(20), dpToPx(12), dpToPx(20), dpToPx(8))
+                }
+
+                val hint = TextView(this@MainActivity).apply {
+                    text = "請輸入靜音超時秒數 (輸入 0 為關閉)："
+                    setTextColor(Color.parseColor("#8C93A4"))
+                    textSize = 13f
+                    setPadding(0, 0, 0, dpToPx(8))
+                }
+
+                val input = EditText(this@MainActivity).apply {
+                    inputType = InputType.TYPE_CLASS_NUMBER
+                    setText(settings.muteResumeTimeoutSec.toString())
+                    setTextColor(Color.WHITE)
+                    textSize = 18f
+                    typeface = Typeface.DEFAULT_BOLD
+                    background = createCardBackground(Color.parseColor("#242A36"), 6f)
+                    setPadding(dpToPx(12), dpToPx(10), dpToPx(12), dpToPx(10))
+                    gravity = Gravity.CENTER
+                }
+
+                val quickRow = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    setPadding(0, dpToPx(10), 0, 0)
+                }
+                val presets = listOf("關閉" to 0, "30秒" to 30, "60秒" to 60, "3分鐘" to 180)
+                for ((label, value) in presets) {
+                    val chip = Button(this@MainActivity).apply {
+                        text = label
+                        textSize = 11f
+                        setTextColor(Color.WHITE)
+                        background = createCardBackground(Color.parseColor("#2A3140"), 4f)
+                        layoutParams = LinearLayout.LayoutParams(0, dpToPx(32), 1f).apply {
+                            setMargins(dpToPx(2), 0, dpToPx(2), 0)
+                        }
+                        setOnClickListener { input.setText(value.toString()) }
                     }
+                    quickRow.addView(chip)
+                }
+
+                inputContainer.addView(hint)
+                inputContainer.addView(input)
+                inputContainer.addView(quickRow)
+
+                AlertDialog.Builder(this@MainActivity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                    .setTitle("自訂靜音超時時間")
+                    .setView(inputContainer)
+                    .setPositiveButton("確定") { _, _ ->
+                        val inputSec = input.text.toString().toIntOrNull() ?: settings.muteResumeTimeoutSec
+                        val finalSec = inputSec.coerceIn(0, 3600)
+                        settings = settings.copy(muteResumeTimeoutSec = finalSec)
+                        settingsRepo.saveSettings(settings)
+
+                        text = if (finalSec > 0) "超時自動恢復: $finalSec 秒 (點擊自訂) ▼" else "超時自動恢復: 關閉 ▼"
+                        Toast.makeText(this@MainActivity, if (finalSec > 0) "已設定為 $finalSec 秒自動解除" else "已關閉超時自動解除", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("取消", null)
                     .show()
             }
         }

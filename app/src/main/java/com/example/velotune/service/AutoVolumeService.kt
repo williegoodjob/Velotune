@@ -18,6 +18,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 
+// 靜音倒數資料模型
+data class MuteCountdown(val remainingSec: Int, val totalSec: Int)
+
 class AutoVolumeService : Service() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
@@ -199,6 +202,7 @@ class AutoVolumeService : Service() {
                 val settings = settingsRepo.getSettings()
                 val now = System.currentTimeMillis()
 
+                // 1. GPS 斷訊判定
                 if (_serviceStateFlow.value == ServiceState.RUNNING && lastGpsTimestamp > 0) {
                     val timeSinceLastGps = now - lastGpsTimestamp
                     if (timeSinceLastGps > settings.gpsTimeoutMs && !isGpsLost) {
@@ -208,10 +212,22 @@ class AutoVolumeService : Service() {
                     }
                 }
 
+                // 2. 靜音超時自動恢復判定與倒數發布
                 if (_serviceStateFlow.value == ServiceState.MUTED && settings.muteResumeTimeoutSec > 0 && muteTimestamp > 0) {
-                    if (now - muteTimestamp >= settings.muteResumeTimeoutSec * 1000L) {
+                    val elapsedSec = ((now - muteTimestamp) / 1000L).toInt()
+                    val remainingSec = (settings.muteResumeTimeoutSec - elapsedSec).coerceAtLeast(0)
+
+                    _muteCountdownFlow.value = MuteCountdown(remainingSec, settings.muteResumeTimeoutSec)
+
+                    if (remainingSec <= 0) {
                         _serviceStateFlow.value = ServiceState.RUNNING
+                        _muteCountdownFlow.value = null
+                        muteTimestamp = 0L
                         processVolumeUpdate()
+                    }
+                } else {
+                    if (_muteCountdownFlow.value != null) {
+                        _muteCountdownFlow.value = null
                     }
                 }
             }
@@ -280,6 +296,7 @@ class AutoVolumeService : Service() {
                 if (_serviceStateFlow.value == ServiceState.MUTED) {
                     _serviceStateFlow.value = ServiceState.RUNNING
                     muteTimestamp = 0L
+                    _muteCountdownFlow.value = null // 清除倒數狀態
                 } else {
                     _serviceStateFlow.value = ServiceState.MUTED
                     muteTimestamp = System.currentTimeMillis()
@@ -290,19 +307,20 @@ class AutoVolumeService : Service() {
                 stopSelf()
             }
         }
-        return START_NOT_STICKY // 👈 改為 START_NOT_STICKY，滑掉或被殺後不自動重啟
+        return START_NOT_STICKY // 滑掉或被殺後不自動重啟
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        stopSelf() // 👈 立即停止自身
+        stopSelf() // 從多工卡片滑掉時立即終止
     }
-    // 3. 確保 onDestroy 徹底移除通知與關閉所有監聽
+
     override fun onDestroy() {
         super.onDestroy()
         guidanceDetector.stop()
         btTracker.stop()
         _serviceStateFlow.value = ServiceState.STOPPED
+        _muteCountdownFlow.value = null
         serviceScope.cancel()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -311,7 +329,7 @@ class AutoVolumeService : Service() {
             @Suppress("DEPRECATION")
             stopForeground(true)
         }
-        notificationHelper.cancelNotification() // 👈 清除通知欄圖標
+        notificationHelper.cancelNotification()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -337,9 +355,12 @@ class AutoVolumeService : Service() {
         private val _isGpsLostFlow = MutableStateFlow(false)
         val isGpsLostFlow = _isGpsLostFlow.asStateFlow()
 
-        // 導航播報避讓狀態 Flow
         private val _isDuckingFlow = MutableStateFlow(false)
         val isDuckingFlow = _isDuckingFlow.asStateFlow()
+
+        // 靜音倒數進度 Flow (null 代表非倒數狀態)
+        private val _muteCountdownFlow = MutableStateFlow<MuteCountdown?>(null)
+        val muteCountdownFlow = _muteCountdownFlow.asStateFlow()
 
         var activeVolumeCurve: VolumeCurve = VolumeCurve.defaultCurve()
             private set
